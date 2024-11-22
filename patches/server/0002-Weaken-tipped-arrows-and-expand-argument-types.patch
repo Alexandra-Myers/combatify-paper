@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alexandra-Myers <bia416cat@gmail.com>
+Date: Fri, 22 Nov 2024 16:45:55 -0500
+Subject: [PATCH] first tweaks
+
+
+diff --git a/src/main/java/com/mojang/brigadier/arguments/ArgumentType.java b/src/main/java/com/mojang/brigadier/arguments/ArgumentType.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..af905ecf09fb298e78df93bf4abefe80deb8b67d
+--- /dev/null
++++ b/src/main/java/com/mojang/brigadier/arguments/ArgumentType.java
+@@ -0,0 +1,37 @@
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT license.
++
++package com.mojang.brigadier.arguments;
++
++import com.mojang.brigadier.StringReader;
++import com.mojang.brigadier.context.CommandContext;
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
++import com.mojang.brigadier.suggestion.Suggestions;
++import com.mojang.brigadier.suggestion.SuggestionsBuilder;
++
++import java.util.Collection;
++import java.util.Collections;
++import java.util.concurrent.CompletableFuture;
++
++public interface ArgumentType<T> {
++    T parse(StringReader reader) throws CommandSyntaxException;
++
++    default <S> T parse(final StringReader reader, final S source) throws CommandSyntaxException {
++        return parse(reader);
++    }
++
++
++    // Combatify start - Add built current command context as a parameter
++    default <S> T parse(final StringReader reader, final CommandContext<S> context) throws CommandSyntaxException {
++        return parse(reader, context.getSource());
++    }
++    // Combatify end
++
++    default <S> CompletableFuture<Suggestions> listSuggestions(final CommandContext<S> context, final SuggestionsBuilder builder) {
++        return Suggestions.empty();
++    }
++
++    default Collection<String> getExamples() {
++        return Collections.emptyList();
++    }
++}
+diff --git a/src/main/java/com/mojang/brigadier/tree/ArgumentCommandNode.java b/src/main/java/com/mojang/brigadier/tree/ArgumentCommandNode.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f57b3c16d3658faa07ecda12f5f31a71f1f0c02
+--- /dev/null
++++ b/src/main/java/com/mojang/brigadier/tree/ArgumentCommandNode.java
+@@ -0,0 +1,131 @@
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT license.
++
++package com.mojang.brigadier.tree;
++
++import com.mojang.brigadier.Command;
++import com.mojang.brigadier.RedirectModifier;
++import com.mojang.brigadier.StringReader;
++import com.mojang.brigadier.arguments.ArgumentType;
++import com.mojang.brigadier.builder.RequiredArgumentBuilder;
++import com.mojang.brigadier.context.CommandContext;
++import com.mojang.brigadier.context.CommandContextBuilder;
++import com.mojang.brigadier.context.ParsedArgument;
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
++import com.mojang.brigadier.suggestion.SuggestionProvider;
++import com.mojang.brigadier.suggestion.Suggestions;
++import com.mojang.brigadier.suggestion.SuggestionsBuilder;
++
++import java.util.Collection;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Predicate;
++
++public class ArgumentCommandNode<S, T> extends CommandNode<S> {
++    private static final String USAGE_ARGUMENT_OPEN = "<";
++    private static final String USAGE_ARGUMENT_CLOSE = ">";
++
++    private final String name;
++    private final ArgumentType<T> type;
++    private final SuggestionProvider<S> customSuggestions;
++
++    public ArgumentCommandNode(final String name, final ArgumentType<T> type, final Command<S> command, final Predicate<S> requirement, final CommandNode<S> redirect, final RedirectModifier<S> modifier, final boolean forks, final SuggestionProvider<S> customSuggestions) {
++        super(command, requirement, redirect, modifier, forks);
++        this.name = name;
++        this.type = type;
++        this.customSuggestions = customSuggestions;
++    }
++
++    public ArgumentType<T> getType() {
++        return type;
++    }
++
++    @Override
++    public String getName() {
++        return name;
++    }
++
++    @Override
++    public String getUsageText() {
++        return USAGE_ARGUMENT_OPEN + name + USAGE_ARGUMENT_CLOSE;
++    }
++
++    public SuggestionProvider<S> getCustomSuggestions() {
++        return customSuggestions;
++    }
++
++    @Override
++    public void parse(final StringReader reader, final CommandContextBuilder<S> contextBuilder) throws CommandSyntaxException {
++        final int start = reader.getCursor();
++        final T result = type.parse(reader, contextBuilder.copy().build(reader.getRead())); // Combatify - Pass in built version of the current context for context-aware commands
++        final ParsedArgument<S, T> parsed = new ParsedArgument<>(start, reader.getCursor(), result);
++
++        contextBuilder.withArgument(name, parsed);
++        contextBuilder.withNode(this, parsed.getRange());
++    }
++
++    @Override
++    public CompletableFuture<Suggestions> listSuggestions(final CommandContext<S> context, final SuggestionsBuilder builder) throws CommandSyntaxException {
++        if (customSuggestions == null) {
++            return type.listSuggestions(context, builder);
++        } else {
++            return customSuggestions.getSuggestions(context, builder);
++        }
++    }
++
++    @Override
++    public RequiredArgumentBuilder<S, T> createBuilder() {
++        final RequiredArgumentBuilder<S, T> builder = RequiredArgumentBuilder.argument(name, type);
++        builder.requires(getRequirement());
++        builder.forward(getRedirect(), getRedirectModifier(), isFork());
++        builder.suggests(customSuggestions);
++        if (getCommand() != null) {
++            builder.executes(getCommand());
++        }
++        return builder;
++    }
++
++    @Override
++    public boolean isValidInput(final String input) {
++        try {
++            final StringReader reader = new StringReader(input);
++            type.parse(reader);
++            return !reader.canRead() || reader.peek() == ' ';
++        } catch (final CommandSyntaxException ignored) {
++            return false;
++        }
++    }
++
++    @Override
++    public boolean equals(final Object o) {
++        if (this == o) return true;
++        if (!(o instanceof ArgumentCommandNode)) return false;
++
++        final ArgumentCommandNode that = (ArgumentCommandNode) o;
++
++        if (!name.equals(that.name)) return false;
++        if (!type.equals(that.type)) return false;
++        return super.equals(o);
++    }
++
++    @Override
++    public int hashCode() {
++        int result = name.hashCode();
++        result = 31 * result + type.hashCode();
++        return result;
++    }
++
++    @Override
++    protected String getSortedKey() {
++        return name;
++    }
++
++    @Override
++    public Collection<String> getExamples() {
++        return type.getExamples();
++    }
++
++    @Override
++    public String toString() {
++        return "<argument " + name + ":" + type +">";
++    }
++}
+diff --git a/src/main/java/com/mojang/brigadier/tree/CommandNode.java b/src/main/java/com/mojang/brigadier/tree/CommandNode.java
+index dc76fcf4c6cc6cd65ce117b1855c15ede60f30ab..0dafa33de4db9305ce873f5e9aa88ea19f085f3d 100644
+--- a/src/main/java/com/mojang/brigadier/tree/CommandNode.java
++++ b/src/main/java/com/mojang/brigadier/tree/CommandNode.java
+@@ -126,7 +126,7 @@ public abstract class CommandNode<S> implements Comparable<CommandNode<S>> {
+                     }
+                 }
+ 
+-                if (matches.size() > 0) {
++                if (!matches.isEmpty()) {
+                     consumer.ambiguous(this, child, sibling, matches);
+                     matches = new HashSet<>();
+                 }
+diff --git a/src/main/java/net/minecraft/world/entity/projectile/Arrow.java b/src/main/java/net/minecraft/world/entity/projectile/Arrow.java
+index 2452e689f4e0618d0ae573dacd853faefe308e19..673a122c788a26956dcf909bfbed06157625a872 100644
+--- a/src/main/java/net/minecraft/world/entity/projectile/Arrow.java
++++ b/src/main/java/net/minecraft/world/entity/projectile/Arrow.java
+@@ -117,9 +117,11 @@ public class Arrow extends AbstractArrow {
+ 
+             while (iterator.hasNext()) {
+                 mobeffect = (MobEffectInstance) iterator.next();
+-                target.addEffect(new MobEffectInstance(mobeffect.getEffect(), Math.max(mobeffect.mapDuration((i) -> {
+-                    return i / 8;
+-                }), 1), mobeffect.getAmplifier(), mobeffect.isAmbient(), mobeffect.isVisible()), entity, org.bukkit.event.entity.EntityPotionEffectEvent.Cause.ARROW); // CraftBukkit
++                if (mobeffect.getEffect().value().isInstantenous()) {
++                    mobeffect.getEffect().value().applyInstantenousEffect(this, getEffectSource(), target, mobeffect.getAmplifier(), 0.125);
++                    continue;
++                }
++                target.addEffect(new MobEffectInstance(mobeffect.getEffect(), Math.max(mobeffect.mapDuration((i) -> i / 8), 1), mobeffect.getAmplifier(), mobeffect.isAmbient(), mobeffect.isVisible()), entity, org.bukkit.event.entity.EntityPotionEffectEvent.Cause.ARROW); // CraftBukkit
+             }
+         }
+ 
